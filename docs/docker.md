@@ -30,3 +30,7 @@ docker compose exec app php artisan migrate:fresh
 
 
 docker compose logs --tail=100 -f app
+
+
+docker compose stop app
+docker compose up -d app

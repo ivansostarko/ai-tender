@@ -39,6 +39,7 @@ return [
             'serialize' => false,
         ],
 
+        /** 
         'database' => [
             'driver' => 'database',
             'connection' => env('DB_CACHE_CONNECTION'),
@@ -46,7 +47,7 @@ return [
             'lock_connection' => env('DB_CACHE_LOCK_CONNECTION'),
             'lock_table' => env('DB_CACHE_LOCK_TABLE'),
         ],
-
+ */
         'file' => [
             'driver' => 'file',
             'path' => storage_path('framework/cache/data'),
@@ -68,7 +69,7 @@ return [
         'failover' => [
             'driver' => 'failover',
             'stores' => [
-                'database',
+               // 'database',
                 'octane',
                 'array'
             ],
