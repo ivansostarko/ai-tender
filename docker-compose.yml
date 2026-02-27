@@ -1,0 +1,403 @@
+services:
+
+  # Nginx web server to serve static assets and reverse proxy to the app
+  nginx:
+    image: nginx:latest
+    container_name: loki_nginx
+    hostname: loki_nginx
+    links:
+      - app
+    ports:
+      - "${NGINX_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+  # NodeJS for building assets with Vite
+  node:
+    image: node:25-alpine
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - node_modules:/app/node_modules
+    environment:
+      NODE_ENV: production
+    #command: sh -lc "npm update"
+    tty: true
+    stdin_open: true
+    container_name: loki_node
+    hostname: loki_node
+    env_file:
+      - .env
+    networks:
+      - app_network
+
+  # PHP Application server running Laravel Octane with the FrankenPHP server
+  app:
+    build:
+      context: .
+      dockerfile: docker/frankenphp/Dockerfile
+    container_name: loki_app
+    hostname: loki_app
+    working_dir: /app
+    env_file:
+      - .env
+    command: >
+      bash -lc "php artisan octane:start
+      --server=frankenphp
+      --host=0.0.0.0
+      --port=8000
+      --admin-port=2019
+      --workers=${OCTANE_WORKERS:-auto}
+      --max-requests=${OCTANE_MAX_REQUESTS:-500}
+      --watch"
+    expose:
+      - "8000"
+      - "2019"
+    volumes:
+      - ./:/app:delegated
+      - vendor:/app/vendor
+      - storage:/app/storage
+      - bootstrap_cache:/app/bootstrap/cache
+    links:
+      - redis-cache
+      - redis-queue
+      - redis-session
+      - redis-broadcast
+      - mysql
+      - mysql-logs
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+
+
+  # MySQL database for the main application
+  mysql:
+    image: mysql:8.0
+    container_name: loki_mysql
+    hostname: loki_mysql
+    command: ["mysqld", "--default-authentication-plugin=mysql_native_password"]
+    env_file:
+      - .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_DATABASE:-loki}
+      MYSQL_USER: ${DB_USERNAME:-loki}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-secret}
+    ports:
+      - "${DB_PORT:-33061}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+ #     - ./docker/mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+
+  # MySQL database for storing logs (e.g. from Laravel's MySQL log channel)
+  mysql-logs:
+    image: mysql:8.0
+    container_name: loki_mysql_logs
+    hostname: loki_mysql_logs
+    command: ["mysqld", "--default-authentication-plugin=mysql_native_password"]
+    env_file:
+      - .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_LOGS_DATABASE:-loki}
+      MYSQL_USER: ${DB_LOGS_SERNAME:-loki}
+      MYSQL_PASSWORD: ${DB_LOGS_PASSWORD:-secret}
+    ports:
+      - "${DB_LOGS_PORT:-33062}:3306"
+    volumes:
+      - mysql_logs_data:/var/lib/mysql
+ #     - ./docker/mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+
+  # Redis Cache
+  redis-cache:
+    image: redis:8.2-alpine
+    container_name: loki_redis_cache
+    hostname: loki_redis_cache
+    command: redis-server  --appendonly yes --requirepass ${REDIS_PASSWORD_CACHE}
+    ports:
+      - "${REDIS_PORT_CACHE}:6379"
+    volumes:
+      - redis_cache_data:/data
+    networks:
+      - app_network
+    #restart: always
+    tty: true
+    stdin_open: true
+
+  # Redis Queue
+  redis-queue:
+    image: redis:8.2-alpine
+    container_name: loki_redis_queue
+    hostname: loki_redis_queue
+    command: redis-server  --appendonly yes --requirepass ${REDIS_PASSWORD_QUEUE:-cx54fdg@2}
+    ports:
+      - "${REDIS_PORT_QUEUE:-6388}:6379"
+    volumes:
+      - redis_queue_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "127.0.0.1", "-p", "6379", "-a", "${REDIS_PASSWORD_QUEUE:-cx54fdg@2}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+  # Redis Session
+  redis-session:
+    image: redis:8.2-alpine
+    container_name: loki_redis_session
+    hostname: loki_redis_session
+    command: redis-server  --appendonly yes --requirepass ${REDIS_PASSWORD_SESSION:-cx54fdg@3}
+    ports:
+      - "${REDIS_PORT_SESSION:-6347}:6379"
+    volumes:
+      - redis_session_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "127.0.0.1", "-p", "6379", "-a", "${REDIS_PASSWORD_SESSION:-cx54fdg@3}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+
+  # Redis Broadcast
+  redis-broadcast:
+    image: redis:8.2-alpine
+    container_name: loki_redis_broadcast
+    hostname: loki_redis_broadcast
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD_BROADCAST:-cx54fdg@4}
+    ports:
+      - "${REDIS_PORT_BROADCAST:-6307}:6379"
+    volumes:
+      - redis_broadcast_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "127.0.0.1", "-p", "6379", "-a", "${REDIS_PASSWORD_BROADCAST:-cx54fdg@4}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - app_network
+    #restart: always
+    tty: true
+    stdin_open: true
+
+
+  #Mailpit for catching outgoing emails in development  
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: loki_mailpit
+    hostname: loki_mailpit
+    ports:
+      - "${MAILPIT_HTTP_PORT:-8025}:8025"
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+  # Meilisearch for full-text search capabilities
+  meilisearch:
+    image: getmeili/meilisearch:v1.15
+    container_name: loki_meilisearch
+    hostname: loki_meilisearch
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "${MEILI_PORT:-7700}:7700"
+    volumes:
+      - meili_data:/meili_data
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+  # PHP CLI container for running artisan commands, tinker, etc. Useful for development and debugging.
+  cli:
+    build:
+      context: .
+      dockerfile: docker/frankenphp/Dockerfile
+    container_name: loki_cli
+    hostname: loki_cli
+    working_dir: /app
+    env_file:
+      - .env
+    command: ["bash", "-lc", "sleep infinity"]
+    volumes:
+      - ./:/app:delegated
+      - vendor:/app/vendor
+      - storage:/app/storage
+      - bootstrap_cache:/app/bootstrap/cache
+    links:
+      - redis-cache
+      - redis-queue
+      - redis-session
+      - mysql
+      - mysql-logs
+      - mailpit
+      - meilisearch
+    networks:
+      - app_network
+    restart: no
+    tty: true
+    stdin_open: true
+
+
+
+  # PHP Scheduler. 
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/frankenphp/Dockerfile
+    container_name: loki_scheduler
+    hostname: loki_scheduler
+    working_dir: /app
+    env_file:
+      - .env
+    command: >
+      bash -lc "php artisan schedule:work"
+    volumes:
+      - ./:/app:delegated
+      - vendor:/app/vendor
+      - storage:/app/storage
+      - bootstrap_cache:/app/bootstrap/cache
+    links:
+      - redis-cache
+      - redis-queue
+      - redis-session
+      - mysql
+      - mysql-logs
+      - mailpit
+      - meilisearch
+      - mysql
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+  # Horizon container for running Laravel Horizon to monitor queues. 
+  horizon:
+    build:
+      context: .
+      dockerfile: docker/frankenphp/Dockerfile
+    container_name: loki_horizon
+    hostname: loki_horizon
+    working_dir: /app
+    env_file:
+      - .env
+    command: >
+      bash -lc "php artisan horizon"
+    volumes:
+      - ./:/app:delegated
+      - vendor:/app/vendor
+      - storage:/app/storage
+      - bootstrap_cache:/app/bootstrap/cache
+    links:
+      - redis-cache
+      - redis-queue
+      - redis-session
+      - mysql
+      - mysql-logs
+      - mailpit
+      - meilisearch
+    networks:
+      - app_network
+    restart: always
+    tty: true
+    stdin_open: true
+
+  ## Yacht Docker UI for managing containers
+  yacht:
+    container_name: yacht
+    restart: unless-stopped
+    ports:
+      - "5001:8000"
+    volumes:
+      - yacht:/config
+      - /var/run/docker.sock:/var/run/docker.sock
+    image: selfhostedpro/yacht
+    tty: true
+    stdin_open: true
+    networks:
+      - app_network
+
+
+  ## Adminer for managing MySQL databases via a web UI
+  adminer:
+    image: adminer:latest   # or adminer:4-standalone for older stable version
+    container_name: adminer
+    restart: unless-stopped
+    ports:
+      - "8050:8080"           # Access Adminer at http://localhost:8080
+    environment:
+      # Makes "mysql" the pre-filled/default server in the login form
+      ADMINER_DEFAULT_SERVER: mysql
+      # Optional: nicer design/theme (examples: pepa-linha, nette, ...)
+      # ADMINER_DESIGN: pepa-linha
+    tty: true
+    stdin_open: true
+    links:
+      - mysql
+    networks:
+      - app_network
+
+
+# Network and Volume definitions
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  mysql_logs_data:
+  redis_broadcast_data:
+  redis_cache_data:
+  redis_data:
+  redis_queue_data:
+  redis_session_data:
+  vendor:
+  storage:
+  bootstrap_cache:
+  node_modules:
+  yacht:
+ 
