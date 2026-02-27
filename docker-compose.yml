@@ -244,7 +244,7 @@ services:
     ports:
       - "${MEILI_PORT:-7700}:7700"
     volumes:
-      - meili_data:/meili_data
+      - meilisearch_data:/meili_data
     networks:
       - app_network
     restart: always
@@ -400,4 +400,5 @@ volumes:
   bootstrap_cache:
   node_modules:
   yacht:
+  meilisearch_data:
  
