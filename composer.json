@@ -17,6 +17,7 @@
         "laravel/socialite": "^5.24",
         "laravel/telescope": "^5.18",
         "laravel/tinker": "^2.10.1",
+        "nwidart/laravel-modules": "^12.0",
         "typesense/typesense-php": "^6.0"
     },
     "require-dev": {
@@ -81,7 +82,12 @@
     "extra": {
         "laravel": {
             "dont-discover": []
-        }
+        },    
+        "merge-plugin": {
+        "include": [
+            "Modules/*/composer.json"
+        ]
+    }
     },
     "config": {
         "optimize-autoloader": true,
@@ -89,7 +95,8 @@
         "sort-packages": true,
         "allow-plugins": {
             "pestphp/pest-plugin": true,
-            "php-http/discovery": true
+            "php-http/discovery": true,
+            "wikimedia/composer-merge-plugin": true
         }
     },
     "minimum-stability": "stable",
