@@ -18,7 +18,8 @@ RUN install-php-extensions \
     opcache \
     mongodb \
     pcntl \
-    exif
+    exif \
+    bcmath
 
 # Composer (copy binary from official composer image)
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
