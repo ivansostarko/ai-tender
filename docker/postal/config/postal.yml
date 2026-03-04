@@ -1,0 +1,57 @@
+# Postal v3 config (format version 2)
+# Edit the hostnames + credentials before first run.
+version: 2
+
+postal:
+  web_hostname: postal.example.com
+  web_protocol: https
+  smtp_hostname: postal.example.com
+  signing_key_path: /config/signing.key
+
+web_server:
+  default_port: 5000
+  default_bind_address: 0.0.0.0
+  max_threads: 8
+
+worker:
+  default_health_server_port: 9090
+  default_health_server_bind_address: 0.0.0.0
+  threads: 4
+
+smtp_server:
+  default_port: 25
+  default_bind_address: ::
+  default_health_server_port: 9091
+  default_health_server_bind_address: 0.0.0.0
+  tls_enabled: false
+
+main_db:
+  host: postal-mariadb
+  port: 3306
+  username: postal
+  password: CHANGE_ME_POSTAL_DB_PASSWORD
+  database: postal
+  pool_size: 10
+  encoding: utf8mb4
+
+message_db:
+  host: postal-mariadb
+  port: 3306
+  username: postal
+  password: CHANGE_ME_POSTAL_DB_PASSWORD
+  encoding: utf8mb4
+  database_name_prefix: postal
+
+logging:
+  enabled: true
+  highlighting_enabled: false
+  rails_log_enabled: false
+  sentry_dsn:
+
+dns:
+  mx_records:
+    - mx1.postal.example.com
+  spf_include: spf.postal.example.com
+  return_path_domain: rp.postal.example.com
+  route_domain: routes.postal.example.com
+  track_domain: track.postal.example.com

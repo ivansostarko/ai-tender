@@ -1,0 +1,301 @@
+# Observability + Mail stack (single-node Docker Compose)
+# Includes: MinIO, GlitchTip, Grafana, Prometheus, Jaeger, Postal
+#
+# Notes (production reality check):
+# - Postal is a real mail platform. It needs correct DNS (MX, SPF, DKIM, DMARC), a public IP, and usually a dedicated host.
+# - Don’t expose admin UIs to the public internet without TLS + auth + firewalling.
+#
+# Compose Spec reference: https://compose-spec.io/
+name: observability-mail-stack
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  backend:
+    driver: bridge
+  observability:
+    driver: bridge
+  mail:
+    driver: bridge
+
+volumes:
+  # MinIO
+  minio_data:
+
+  # Prometheus / Grafana
+  prometheus_data:
+  grafana_data:
+
+  # Jaeger
+  jaeger_badger:
+
+  # GlitchTip
+  glitchtip_pg_data:
+  glitchtip_redis_data:
+  glitchtip_uploads:
+
+  # Postal
+  postal_mariadb_data:
+
+services:
+  # -----------------------
+  # MinIO (S3-compatible)
+  # -----------------------
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # Prometheus metrics (simplest mode):
+      MINIO_PROMETHEUS_AUTH_TYPE: "public"
+    ports:
+      - "${MINIO_S3_PORT:-9000}:9000"   # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Console
+    volumes:
+      - minio_data:/data
+    networks:
+      - backend
+      - observability
+    restart: unless-stopped
+    logging: *default-logging
+
+  # One-shot MinIO provisioning (bucket + dedicated user for GlitchTip)
+  # Run: docker compose --profile setup run --rm minio-init
+  minio-init:
+    image: minio/mc:latest
+    profiles: ["setup"]
+    depends_on:
+      - minio
+    entrypoint: ["/bin/sh", "-lc"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_GLITCHTIP_ACCESS_KEY: ${MINIO_GLITCHTIP_ACCESS_KEY}
+      MINIO_GLITCHTIP_SECRET_KEY: ${MINIO_GLITCHTIP_SECRET_KEY}
+      MINIO_GLITCHTIP_BUCKET: ${MINIO_GLITCHTIP_BUCKET}
+    command: >
+      '
+      set -euo pipefail;
+      echo "Waiting for MinIO...";
+      until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+        sleep 2;
+      done;
+
+      echo "Creating bucket: $MINIO_GLITCHTIP_BUCKET";
+      mc mb --ignore-existing "local/$MINIO_GLITCHTIP_BUCKET";
+
+      echo "Creating/Updating MinIO user for GlitchTip: $MINIO_GLITCHTIP_ACCESS_KEY";
+      # MinIO treats "access key" as username and "secret key" as password
+      mc admin user add local "$MINIO_GLITCHTIP_ACCESS_KEY" "$MINIO_GLITCHTIP_SECRET_KEY" || true;
+
+      echo "Attaching readwrite policy to GlitchTip user";
+      mc admin policy attach local readwrite --user "$MINIO_GLITCHTIP_ACCESS_KEY" || true;
+
+      echo "Done.";
+      '
+    networks:
+      - backend
+    restart: "no"
+    logging: *default-logging
+
+  # -----------------------
+  # GlitchTip (Sentry-compatible error monitoring)
+  # -----------------------
+  glitchtip-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${GLITCHTIP_POSTGRES_DB}
+      POSTGRES_USER: ${GLITCHTIP_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${GLITCHTIP_POSTGRES_PASSWORD}
+    volumes:
+      - glitchtip_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    networks:
+      - backend
+    restart: unless-stopped
+    logging: *default-logging
+
+  glitchtip-redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${GLITCHTIP_REDIS_PASSWORD}"]
+    volumes:
+      - glitchtip_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${GLITCHTIP_REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    networks:
+      - backend
+    restart: unless-stopped
+    logging: *default-logging
+
+  glitchtip-web:
+    image: glitchtip/glitchtip:6
+    depends_on:
+      glitchtip-postgres:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    ports:
+      - "${GLITCHTIP_HTTP_PORT:-8000}:8080"
+    environment:
+      # Required
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN}          # include scheme, e.g. https://glitchtip.example.com
+      DEFAULT_FROM_EMAIL: ${GLITCHTIP_DEFAULT_FROM_EMAIL}
+      EMAIL_URL: ${GLITCHTIP_EMAIL_URL}
+
+      # Storage + core services
+      DATABASE_URL: "postgres://${GLITCHTIP_POSTGRES_USER}:${GLITCHTIP_POSTGRES_PASSWORD}@glitchtip-postgres:5432/${GLITCHTIP_POSTGRES_DB}"
+      REDIS_URL: "redis://:${GLITCHTIP_REDIS_PASSWORD}@glitchtip-redis:6379/0"
+
+      # Optional S3-compatible storage (MinIO) for uploads/sourcemaps
+      DEFAULT_FILE_STORAGE: "storages.backends.s3boto3.S3Boto3Storage"
+      AWS_ACCESS_KEY_ID: ${MINIO_GLITCHTIP_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_GLITCHTIP_SECRET_KEY}
+      AWS_STORAGE_BUCKET_NAME: ${MINIO_GLITCHTIP_BUCKET}
+      AWS_S3_ENDPOINT_URL: "http://minio:9000"
+      AWS_S3_REGION_NAME: "us-east-1"
+      AWS_S3_USE_SSL: "false"
+    volumes:
+      - glitchtip_uploads:/code/uploads
+    networks:
+      - backend
+      - observability
+    restart: unless-stopped
+    logging: *default-logging
+
+  glitchtip-worker:
+    image: glitchtip/glitchtip:6
+    command: ./bin/run-celery-with-beat.sh
+    depends_on:
+      glitchtip-postgres:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    environment:
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN}
+      DEFAULT_FROM_EMAIL: ${GLITCHTIP_DEFAULT_FROM_EMAIL}
+      EMAIL_URL: ${GLITCHTIP_EMAIL_URL}
+      DATABASE_URL: "postgres://${GLITCHTIP_POSTGRES_USER}:${GLITCHTIP_POSTGRES_PASSWORD}@glitchtip-postgres:5432/${GLITCHTIP_POSTGRES_DB}"
+      REDIS_URL: "redis://:${GLITCHTIP_REDIS_PASSWORD}@glitchtip-redis:6379/0"
+      DEFAULT_FILE_STORAGE: "storages.backends.s3boto3.S3Boto3Storage"
+      AWS_ACCESS_KEY_ID: ${MINIO_GLITCHTIP_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_GLITCHTIP_SECRET_KEY}
+      AWS_STORAGE_BUCKET_NAME: ${MINIO_GLITCHTIP_BUCKET}
+      AWS_S3_ENDPOINT_URL: "http://minio:9000"
+      AWS_S3_REGION_NAME: "us-east-1"
+      AWS_S3_USE_SSL: "false"
+    volumes:
+      - glitchtip_uploads:/code/uploads
+    networks:
+      - backend
+    restart: unless-stopped
+    logging: *default-logging
+
+  # One-shot DB migration for GlitchTip
+  # Run: docker compose --profile setup run --rm glitchtip-migrate
+  glitchtip-migrate:
+    image: glitchtip/glitchtip:6
+    profiles: ["setup"]
+    depends_on:
+      glitchtip-postgres:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    command: "./manage.py migrate"
+    environment:
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN}
+      DEFAULT_FROM_EMAIL: ${GLITCHTIP_DEFAULT_FROM_EMAIL}
+      EMAIL_URL: ${GLITCHTIP_EMAIL_URL}
+      DATABASE_URL: "postgres://${GLITCHTIP_POSTGRES_USER}:${GLITCHTIP_POSTGRES_PASSWORD}@glitchtip-postgres:5432/${GLITCHTIP_POSTGRES_DB}"
+      REDIS_URL: "redis://:${GLITCHTIP_REDIS_PASSWORD}@glitchtip-redis:6379/0"
+    networks:
+      - backend
+    restart: "no"
+    logging: *default-logging
+
+  # -----------------------
+  # Jaeger (tracing) - all-in-one w/ Badger persistence
+  # -----------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    environment:
+      SPAN_STORAGE_TYPE: "badger"
+      BADGER_EPHEMERAL: "false"
+      BADGER_DIRECTORY_VALUE: "/badger/data"
+      BADGER_DIRECTORY_KEY: "/badger/key"
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"     # UI
+      - "4317:4317"                          # OTLP gRPC
+      - "4318:4318"                          # OTLP HTTP
+      - "14250:14250"                        # gRPC collector
+      - "14268:14268"                        # HTTP collector
+      - "14269:14269"                        # admin/metrics (/metrics)
+      - "9411:9411"                          # Zipkin compatibility
+      - "6831:6831/udp"                      # Agent compact thrift
+      - "6832:6832/udp"                      # Agent binary thrift
+    volumes:
+      - jaeger_badger:/badger
+    networks:
+      - observability
+    restart: unless-stopped
+    logging: *default-logging
+
+  # -----------------------
+  # Prometheus (metrics)
+  # -----------------------
+  prometheus:
+    image: prom/prometheus:v3.10.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    networks:
+      - observability
+      - backend
+    restart: unless-stopped
+    logging: *default-logging
+
+  # -----------------------
+  # Grafana (dashboards)
+  # -----------------------
+  grafana:
+    image: grafana/grafana-oss:12.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_METRICS_ENABLED: "true"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:${GRAFANA_PORT:-3000}}
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - observability
+    restart: unless-stopped
+    logging: *default-logging
+
+

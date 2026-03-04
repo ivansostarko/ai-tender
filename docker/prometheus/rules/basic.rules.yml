@@ -1,0 +1,11 @@
+groups:
+  - name: basic.rules
+    rules:
+      - alert: InstanceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instance down (job={{ $labels.job }}, instance={{ $labels.instance }})"
+          description: "Prometheus target has been down for more than 2 minutes."
