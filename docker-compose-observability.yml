@@ -38,8 +38,6 @@ volumes:
   glitchtip_redis_data:
   glitchtip_uploads:
 
-  # Postal
-  postal_mariadb_data:
 
 services:
   # -----------------------
