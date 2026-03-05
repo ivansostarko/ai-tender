@@ -1,12 +1,4 @@
-# Observability + Mail stack (single-node Docker Compose)
-# Includes: MinIO, GlitchTip, Grafana, Prometheus, Jaeger, Postal
-#
-# Notes (production reality check):
-# - Postal is a real mail platform. It needs correct DNS (MX, SPF, DKIM, DMARC), a public IP, and usually a dedicated host.
-# - Don’t expose admin UIs to the public internet without TLS + auth + firewalling.
-#
-# Compose Spec reference: https://compose-spec.io/
-name: observability-mail-stack
+name: observability-stack
 
 x-logging: &default-logging
   driver: "json-file"
@@ -62,44 +54,6 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
-  # One-shot MinIO provisioning (bucket + dedicated user for GlitchTip)
-  # Run: docker compose --profile setup run --rm minio-init
-  minio-init:
-    image: minio/mc:latest
-    profiles: ["setup"]
-    depends_on:
-      - minio
-    entrypoint: ["/bin/sh", "-lc"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      MINIO_GLITCHTIP_ACCESS_KEY: ${MINIO_GLITCHTIP_ACCESS_KEY}
-      MINIO_GLITCHTIP_SECRET_KEY: ${MINIO_GLITCHTIP_SECRET_KEY}
-      MINIO_GLITCHTIP_BUCKET: ${MINIO_GLITCHTIP_BUCKET}
-    command: >
-      '
-      set -euo pipefail;
-      echo "Waiting for MinIO...";
-      until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
-        sleep 2;
-      done;
-
-      echo "Creating bucket: $MINIO_GLITCHTIP_BUCKET";
-      mc mb --ignore-existing "local/$MINIO_GLITCHTIP_BUCKET";
-
-      echo "Creating/Updating MinIO user for GlitchTip: $MINIO_GLITCHTIP_ACCESS_KEY";
-      # MinIO treats "access key" as username and "secret key" as password
-      mc admin user add local "$MINIO_GLITCHTIP_ACCESS_KEY" "$MINIO_GLITCHTIP_SECRET_KEY" || true;
-
-      echo "Attaching readwrite policy to GlitchTip user";
-      mc admin policy attach local readwrite --user "$MINIO_GLITCHTIP_ACCESS_KEY" || true;
-
-      echo "Done.";
-      '
-    networks:
-      - backend
-    restart: "no"
-    logging: *default-logging
 
   # -----------------------
   # GlitchTip (Sentry-compatible error monitoring)
@@ -157,14 +111,6 @@ services:
       DATABASE_URL: "postgres://${GLITCHTIP_POSTGRES_USER}:${GLITCHTIP_POSTGRES_PASSWORD}@glitchtip-postgres:5432/${GLITCHTIP_POSTGRES_DB}"
       REDIS_URL: "redis://:${GLITCHTIP_REDIS_PASSWORD}@glitchtip-redis:6379/0"
 
-      # Optional S3-compatible storage (MinIO) for uploads/sourcemaps
-      DEFAULT_FILE_STORAGE: "storages.backends.s3boto3.S3Boto3Storage"
-      AWS_ACCESS_KEY_ID: ${MINIO_GLITCHTIP_ACCESS_KEY}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_GLITCHTIP_SECRET_KEY}
-      AWS_STORAGE_BUCKET_NAME: ${MINIO_GLITCHTIP_BUCKET}
-      AWS_S3_ENDPOINT_URL: "http://minio:9000"
-      AWS_S3_REGION_NAME: "us-east-1"
-      AWS_S3_USE_SSL: "false"
     volumes:
       - glitchtip_uploads:/code/uploads
     networks:
@@ -188,13 +134,6 @@ services:
       EMAIL_URL: ${GLITCHTIP_EMAIL_URL}
       DATABASE_URL: "postgres://${GLITCHTIP_POSTGRES_USER}:${GLITCHTIP_POSTGRES_PASSWORD}@glitchtip-postgres:5432/${GLITCHTIP_POSTGRES_DB}"
       REDIS_URL: "redis://:${GLITCHTIP_REDIS_PASSWORD}@glitchtip-redis:6379/0"
-      DEFAULT_FILE_STORAGE: "storages.backends.s3boto3.S3Boto3Storage"
-      AWS_ACCESS_KEY_ID: ${MINIO_GLITCHTIP_ACCESS_KEY}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_GLITCHTIP_SECRET_KEY}
-      AWS_STORAGE_BUCKET_NAME: ${MINIO_GLITCHTIP_BUCKET}
-      AWS_S3_ENDPOINT_URL: "http://minio:9000"
-      AWS_S3_REGION_NAME: "us-east-1"
-      AWS_S3_USE_SSL: "false"
     volumes:
       - glitchtip_uploads:/code/uploads
     networks:
