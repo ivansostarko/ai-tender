@@ -142,7 +142,7 @@ services:
     logging: *default-logging
 
   # One-shot DB migration for GlitchTip
-  # Run: docker compose --profile setup run --rm glitchtip-migrate
+  # Run: docker compose -f docker-compose-observability.yml --profile setup run --rm glitchtip-migrate
   glitchtip-migrate:
     image: glitchtip/glitchtip:6
     profiles: ["setup"]

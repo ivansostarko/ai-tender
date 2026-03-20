@@ -34,3 +34,11 @@ docker compose logs --tail=100 -f app
 
 docker compose stop app
 docker compose up -d app
+
+
+
+docker compose -f docker-compose-observability.yml up -d
+docker compose -f docker-compose-observability.yml logs -f
+docker compose -f docker-compose-observability.yml ps
+docker compose -f docker-compose-observability.yml down
+docker compose -f docker-compose-observability.yml down -v
